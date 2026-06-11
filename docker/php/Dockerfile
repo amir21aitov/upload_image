@@ -7,7 +7,8 @@ RUN install-php-extensions \
     pgsql \
     zip \
     pcntl \
-    redis
+    redis \
+    gd
 
 RUN apt-get update && apt-get install -y \
     zip \

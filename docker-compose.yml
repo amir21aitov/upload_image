@@ -23,6 +23,26 @@ services:
             DB_HOST: pgsql
             REDIS_HOST: redis
 
+    upload-queue:
+        container_name: upload-queue
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        restart: always
+        networks:
+            - internal
+        volumes:
+            - .:/app
+        depends_on:
+            pgsql:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        environment:
+            DB_HOST: pgsql
+            REDIS_HOST: redis
+        command: php artisan queue:work --tries=3 --timeout=120 --sleep=3
+
     upload-nginx:
         image: nginx:alpine
         container_name: upload-nginx
