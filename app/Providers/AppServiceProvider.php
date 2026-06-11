@@ -2,12 +2,18 @@
 
 namespace App\Providers;
 
+use App\Contracts\AuthServiceInterface;
+use App\Services\AuthService;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
+    public array $bindings = [
+        AuthServiceInterface::class => AuthService::class,
+    ];
+
     /**
-     * Register any application services.
+     * RegistrationRequest any application services.
      */
     public function register(): void
     {
