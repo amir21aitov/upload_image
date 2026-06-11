@@ -3,15 +3,15 @@
 namespace App\Services;
 
 use App\Contracts\AuthServiceInterface;
+use App\DTOs\Auth\LoginDTO;
+use App\DTOs\Auth\RegisterDTO;
+use App\DTOs\Auth\VerifyOtpDTO;
 use App\Exceptions\InvalidCredentialsException;
 use App\Exceptions\InvalidOtpException;
 use App\Exceptions\OtpResendThrottledException;
 use App\Exceptions\UserAlreadyExistsException;
 use App\Exceptions\UserNotFoundException;
 use App\Exceptions\UserNotVerifiedException;
-use App\Http\Requests\Auth\LoginRequest;
-use App\Http\Requests\Auth\RegistrationRequest;
-use App\Http\Requests\Auth\VerifyRequest;
 use App\Mail\OtpMail;
 use App\Models\User;
 use Illuminate\Support\Facades\Cache;
@@ -25,47 +25,41 @@ class AuthService implements AuthServiceInterface
     private const OTP_RESEND_SECONDS = 60;
     private const OTP_MAX_ATTEMPTS = 5;
 
-    public function register(RegistrationRequest $request): array
+    public function register(RegisterDTO $dto): array
     {
-        $email = $this->normalizeEmail($request->email);
-
-        if (!Cache::add($this->resendKey($email), 1, self::OTP_RESEND_SECONDS)) {
-            Log::info('OTP resend throttled', ['email' => $email]);
+        if (!Cache::add($this->resendKey($dto->email), 1, self::OTP_RESEND_SECONDS)) {
+            Log::info('OTP resend throttled', ['email' => $dto->email]);
             throw new OtpResendThrottledException(self::OTP_RESEND_SECONDS);
         }
 
-        $user = User::query()->where('email', $email)->first();
+        $user = User::query()->where('email', $dto->email)->first();
 
         if ($user?->verified_at !== null) {
-            Log::info('Registration attempt for already verified email', ['email' => $email]);
+            Log::info('Registration attempt for already verified email', ['email' => $dto->email]);
             throw new UserAlreadyExistsException();
         }
 
         $otpCode = random_int(100000, 999999);
 
-        $user = DB::transaction(function () use ($user, $request, $email, $otpCode) {
+        $user = DB::transaction(function () use ($user, $dto, $otpCode) {
             if ($user) {
                 $user->update([
-                    'name' => $request->validated('name'),
-                    'password' => $request->validated('password'),
+                    'name' => $dto->name,
+                    'password' => $dto->password,
                 ]);
             } else {
-                $user = User::query()->create([
-                    'name' => $request->validated('name'),
-                    'email' => $email,
-                    'password' => $request->validated('password'),
-                ]);
+                $user = User::query()->create($dto->toArray());
             }
 
-            Cache::put($this->otpKey($email), $otpCode, self::OTP_TTL_SECONDS);
-            Cache::add($this->attemptsKey($email), 0, self::OTP_TTL_SECONDS);
+            Cache::put($this->otpKey($dto->email), $otpCode, self::OTP_TTL_SECONDS);
+            Cache::add($this->attemptsKey($dto->email), 0, self::OTP_TTL_SECONDS);
 
             return $user;
         });
 
-        DB::afterCommit(function () use ($email, $otpCode, $user) {
-            Mail::to($email)->send(new OtpMail($otpCode));
-            Log::info('User registered, OTP queued', ['user_id' => $user->id, 'email' => $email]);
+        DB::afterCommit(function () use ($dto, $otpCode, $user) {
+            Mail::to($dto->email)->send(new OtpMail($otpCode));
+            Log::info('User registered, OTP queued', ['user_id' => $user->id, 'email' => $dto->email]);
         });
 
         return [
@@ -74,52 +68,48 @@ class AuthService implements AuthServiceInterface
         ];
     }
 
-    public function verifyOtp(VerifyRequest $request): User
+    public function verifyOtp(VerifyOtpDTO $dto): User
     {
-        $email = $this->normalizeEmail($request->email);
-
-        $user = User::query()->where('email', $email)->whereNull('verified_at')->first();
+        $user = User::query()->where('email', $dto->email)->whereNull('verified_at')->first();
 
         if (!$user) {
-            Log::warning('OTP verification for non-existent or already verified user', ['email' => $email]);
+            Log::warning('OTP verification for non-existent or already verified user', ['email' => $dto->email]);
             throw new UserNotFoundException();
         }
 
-        $attemptsKey = $this->attemptsKey($email);
+        $attemptsKey = $this->attemptsKey($dto->email);
         Cache::add($attemptsKey, 0, self::OTP_TTL_SECONDS);
         $attempts = (int) Cache::increment($attemptsKey);
 
         if ($attempts > self::OTP_MAX_ATTEMPTS) {
-            $this->clearOtp($email);
-            Log::warning('OTP brute-force blocked', ['email' => $email, 'attempts' => $attempts]);
+            $this->clearOtp($dto->email);
+            Log::warning('OTP brute-force blocked', ['email' => $dto->email, 'attempts' => $attempts]);
             throw new InvalidOtpException('Too many attempts. Request a new code.');
         }
 
-        $cached = Cache::get($this->otpKey($email));
+        $cached = Cache::get($this->otpKey($dto->email));
 
-        if (!$cached || !hash_equals((string) $cached, (string) $request->code)) {
-            Log::info('Invalid OTP attempt', ['email' => $email, 'attempt' => $attempts]);
+        if (!$cached || !hash_equals((string) $cached, (string) $dto->code)) {
+            Log::info('Invalid OTP attempt', ['email' => $dto->email, 'attempt' => $attempts]);
             throw new InvalidOtpException();
         }
 
-        $this->clearOtp($email);
+        $this->clearOtp($dto->email);
 
         $user->verified_at = now();
         $user->save();
 
-        Log::info('User verified via OTP', ['user_id' => $user->id, 'email' => $email]);
+        Log::info('User verified via OTP', ['user_id' => $user->id, 'email' => $dto->email]);
 
         return $user;
     }
 
-    public function login(LoginRequest $request): array
+    public function login(LoginDTO $dto): array
     {
-        $email = $this->normalizeEmail($request->email);
-
-        $user = User::query()->where('email', $email)->first();
+        $user = User::query()->where('email', $dto->email)->first();
 
         if (!$user) {
-            Log::info('Login attempt for non-existent email', ['email' => $email]);
+            Log::info('Login attempt for non-existent email', ['email' => $dto->email]);
             throw new InvalidCredentialsException();
         }
 
@@ -129,8 +119,8 @@ class AuthService implements AuthServiceInterface
         }
 
         $token = auth('api')->attempt([
-            'email' => $email,
-            'password' => $request->password,
+            'email' => $dto->email,
+            'password' => $dto->password,
         ]);
 
         if (!$token) {
@@ -144,11 +134,6 @@ class AuthService implements AuthServiceInterface
             'user' => $user,
             'token' => $token,
         ];
-    }
-
-    private function normalizeEmail(string $email): string
-    {
-        return strtolower(trim($email));
     }
 
     private function otpKey(string $email): string
